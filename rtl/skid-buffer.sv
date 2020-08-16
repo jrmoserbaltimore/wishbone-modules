@@ -8,7 +8,10 @@
 // License: MIT
 //
 // Note skid buffers are only sensible with pipelined mode.  In Registered Feedback classic mode,
-// the skid buffer only supports pipelined handshake.
+// the skid buffer only supports pipelined handshake; note that Registered Feedback must support
+// Classic mode and RF adds several additional signals and complex logic to do everything Classic
+// pipelined can do, so it's advisable to simply not attach CTI and BTE signals and let the
+// synthesizer trim the logic to save logic area.
 
 module WishboneSkidBuffer
 #(
@@ -20,7 +23,6 @@ module WishboneSkidBuffer
     parameter TGCWidth = 1,
     parameter BufferSize = 1, // If bigger than 1
     parameter LOWPOWER = 1, // Reduces register transitions
-    //parameter RegisteredFeedback = 0,
     parameter STRICT = 0, // If set, the bus doesn't clean up after invalid inputs
     localparam SELWidth = DataWidth / Granularity
 )
