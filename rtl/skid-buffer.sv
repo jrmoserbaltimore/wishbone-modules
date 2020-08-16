@@ -102,14 +102,16 @@ module WishboneSkidBuffer
     assign ERR_O = ERR_I;
     assign RTY_O = RTY_I;
 
+    // XXX: CYC_I should be true whenever r_valid is true, so do I need to OR with r_valid?
+    assign CYC_O = CYC_I | r_valid;
+    assign STB_O = i_valid | r_valid;
+
     // assign the inputs or buffer to the outputs
     always_comb
     begin
         // Put the buffered data on the output bus
         if (r_valid)
         begin
-            CYC_O = r_valid;
-            STB_O = r_valid;
             T_DAT_O = r_dat;
             T_TGD_O = r_tgd;
             ADDR_O = r_addr;
@@ -122,9 +124,6 @@ module WishboneSkidBuffer
             BTE_O = r_bte;
         end else
         begin
-            // CYC_I may hold with STB_I negated; STB_I only forwards if valid.
-            CYC_O = CYC_I;
-            STB_O = i_valid;
             if (!LOWPOWER || i_valid)
             begin
                 // If LOWPOWER, this checks i_valid; else there is no check and this always happens
@@ -160,6 +159,8 @@ module WishboneSkidBuffer
     always_ff @(posedge CLK_I)
     if (!RST_I)
     begin
+        // if LOWPOWER, these don't get set unless we have CYC&STB.  In all other conditions
+        // when LOWPOWER, r_* |=> $last(r_*)  (or is it current r_*?)
         if ((!LOWPOWER || i_valid) && !r_valid)
         begin
             r_dat <= I_DAT_I;
