@@ -23,6 +23,15 @@ An intermediate module can apply an error correcting code and may treat the
 parity bit as simple storage, e.g. it may store 64-bit chunks and use the 8
 parity bits for ECC.
 
+# WishboneCache
+
+A basic cache.  Supports one backing store and tracks all metadata in local
+registers.  Caches access to the given source (which may be another cache).
+
+When using Parity, `TGD[n-1:0]` carries the parity bit for each _byte_.  This
+performs no checks, only forwarding the parity through.  Parity may store other
+data, such as (72,64) Hamming ECC, for later error correction.
+
 # WishboneCrossbar
 
 Paramaterized Wishbone crossbar in SystemVerilog.
