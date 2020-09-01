@@ -174,24 +174,36 @@ module WishboneCDCSkidBuffer
     // Receive data and pass to target, if not stalled
     always @(posedge S_Target.CLK)
     begin
-        if (I_Request[T_BufferIndex] && !r_ack[i])
+        if (I_Request[T_BufferIndex][1] && !r_ack[T_BufferIndex])
         begin
-            
-            r_dat[I_BufferIndex] <= Initiator.DAT_ToTarget;
-            r_tgd[I_BufferIndex] <= Initiator.TGD_ToTarget;
-            r_addr[I_BufferIndex] <= Initiator.ADDR;
-            r_lock[I_BufferIndex] <= Initiator.LOCK;
-            r_sel[I_BufferIndex] <= Initiator.SEL;
-            r_tga[I_BufferIndex] <= Initiator.TGA;
-            r_tgc[I_BufferIndex] <= Initiator.TGC;
-            r_we[I_BufferIndex] <= Initiator.WE;
-            r_cti[I_BufferIndex] <= Initiator.CTI;
-            r_bte[I_BufferIndex] <= Initiator.BTE;
-        end
+            Target.DAT_ToTarget <= r_dat[T_BufferIndex];
+            Target.TGD_ToTarget <= r_tgd[T_BufferIndex];
+            Target.ADDR <= r_addr[T_BufferIndex];
+            Target.LOCK <= r_lock[T_BufferIndex];
+            Target.SEL <= r_sel[T_BufferIndex];
+            Target.TGA <= r_tga[T_BufferIndex];
+            Target.TGC <= r_tgc[T_BufferIndex];
+            Target.WE <= r_we[T_BufferIndex];
+            Target.CTI <= r_cti[T_BufferIndex];
+            Target.BTE <= r_bte[T_BufferIndex];
+
+            // Drop CYC if CYC is negated; else raise CYC and STB
+            Target.CYC <= r_cyc;
+            Target.STB <= r_cyc;            
+            //ACK immediately
+            r_ack[T_BufferIndex] <= '1;
+        end else
+        begin
+            // De-assert ACK only after the request drops and we are NOT stalling
+            r_ack[T_BufferIndex] <= !(Target.STALL || I_Request[T_BufferIndex][1]);
+            // Advance on the tick we drop ACK
+            T_BufferIndex <= T_BufferIndex + !(Target.STALL || I_Request[T_BufferIndex][1]);
+            // Drop STB when dropping ACK
+            Target.STB <= !(Target.STALL || I_Request[T_BufferIndex][1]);
+        end        
     end
     // ================================
     // == Target -> Initiator buffer ==
     // ================================
-        // Initiator receiving from Target
-
+    // Initiator receiving from Target
 endmodule
