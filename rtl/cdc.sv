@@ -31,17 +31,17 @@ module WishboneCDCSkidBuffer
     // Buffer size is always at least 2
     localparam BufSzBits = $clog2(BufferSize);
 
-    // Initiator ? I_Request[0] ? I_Request[1] ? Target  [Reply: T_Acknowledge]
-    //                    ?              ?           ?
+    // Initiator -> I_Request[0] -> I_Request[1] -> Target  [Reply: T_Acknowledge]
+    //                    ^                ^         ^
     //                    ----------------------------S_Target.Clk
-    //                   ?              ?                   ?
-    // Initiator ? I_Acknowledge[0] ? I_Acknowledge[1] ? Target
+    //                   v                v                   v
+    // Initiator -> I_Acknowledge[0] -> I_Acknowledge[1] -> Target
     //
-    // Initiator ? T_Request[1] ? T_Request[0] ? Target  [Reply: I_Acknowledge]
-    //     ?               ?               ?
+    // Initiator <- T_Request[1] <- T_Request[0] <- Target  [Reply: I_Acknowledge]
+    //     ^               ^               ^
     // S_Initiator.Clk---------------------
-    //    ?               ?               ?
-    // Initiator ? T_Acknowledge[1] ? T_Acknowledge[0] ? Target
+    //    v               v               v
+    // Initiator <- T_Acknowledge[1] <- T_Acknowledge[0] <- Target
     logic [1:0] I_Request [BufSzBits-1:0];
     logic [1:0] I_Acknowledge [BufSzBits-1:0];
     logic [1:0] T_Request [BufSzBits-1:0];
@@ -51,18 +51,18 @@ module WishboneCDCSkidBuffer
     
     // Buffer to which Initiator is writing
     logic [BufSzBits-1:0] I_BufferIndex;
-    // Buffer to which Target is reading
+    // Buffer from which Target is reading
     logic [BufSzBits-1:0] T_BufferIndex;
     // =====================================
-    // == Initiator ? Target skid buffer ==
+    // == Initiator -> Target skid buffer ==
     // =====================================
     // Uses:  I_Request, T_Acknowledge. I_BufferIndex
     //
     // This skid buffer uses multiple CDCs and multiple buffers in a ring.  Each looks as such:
     //
-    //  r_valid?ff?ff?   
-    //     data?ff——?
-    //      Ack?ff?ff?
+    //  r_valid>ff>ff>   
+    //     data>ff——>
+    //      Ack>ff>ff>
     //
     // Both sides walk around in a ring.  The sender checks if (!r_valid && !Ack) on the current
     // entry and, if so, sets r_valid and data; upon receiving Ack, it resets r_valid.
@@ -70,12 +70,22 @@ module WishboneCDCSkidBuffer
     // The receiver checks r_valid and, if set, takes the data and sends an Ack.  Upon r_valid
     // resetting, the receiver resets Ack UNLESS it is in a stall condition.
 
-    logic i_valid;
+    // need to have the prior cycle's CYC to test for next cycle.
+    // CYC can't drop until after all ACKs are received; regardless, when CYC does drop, all
+    // buffers are overwritten with CYC=0, and the CDC stalls until it can actually send a CYC=0
+    // request.
+    logic LastCYC;
+    wire i_valid;
+    wire i_DroppedCYC;
+    logic r_DroppedCYC;
     assign i_valid = Initiator.CYC & Initiator.STB;
+    assign i_DroppedCYC = (LastCYC & ~Initiator.CYC) | r_DroppedCYC;
 
-    // r_valid outputs to CYC_I and STB_I when forwarding the register
+    // r_valid indicates something has crossed
     logic r_valid [BufSzBits-1:0];
     logic r_ack [BufSzBits-1:0];
+    // Need to actually propagate cyc; stb is implicit
+    logic r_cyc [BufSzBits-1:0];
     logic [DataWidth-1:0] r_dat [BufSzBits-1:0];
     logic [TGDWidth-1:0] r_tgd [BufSzBits-1:0];
     logic [AddressWidth-1:0] r_addr [BufSzBits-1:0];
@@ -90,35 +100,83 @@ module WishboneCDCSkidBuffer
     // Stall whenever the current buffer is not acknowledged clear 
     wire Stall;
     assign Stall = r_valid[I_BufferIndex] | T_Acknowledge[1];
-    assign Initiator.STALL = Stall;
+    // Stall until 
+    assign Initiator.STALL = Stall | i_DroppedCYC;
 
     // Handle the handshake sending from Initiator to Target:
     //  - Set and clear r_valid when appropriate
     //  - propagate T_Acknowledge
-    generate
-        genvar i;
-        for (i=0; i < 2**BufferSize; i++)
-        always @(posedge S_Initiator.CLK)
-        begin
-            // Ready to store a new input into the currently-selected buffer
-            if (!Stall && i_valid && (i == I_BufferIndex))
-            begin
-                r_valid[i] <= '1;
-            // If not ready and received an ACK, clear r_valid
-            end else if (T_Acknowledge[i][1])
-                r_valid[i] <= '0;
-            // Propagate the ack
-            T_Acknowledge[i][1] <= T_Acknowledge[i][0];
-            T_Acknowledge[i][0] <= r_ack[i]; // XXX:  Have to ack when not stalled
-        end
-    endgenerate
-
-    // Put the data on the buffer
+    //  - Propagate Initiator.CYC negation
     always @(posedge S_Initiator.CLK)
     begin
-        // Store a new input into the buffer
-        if (!Stall && i_valid)
+        var i;
+        // Store a new input into the buffer to make it available to the Target
+        if (!Stall && i_valid && !i_DroppedCYC)
         begin
+            r_cyc[I_BufferIndex] <= Initiator.CYC;
+            r_dat[I_BufferIndex] <= Initiator.DAT_ToTarget;
+            r_tgd[I_BufferIndex] <= Initiator.TGD_ToTarget;
+            r_addr[I_BufferIndex] <= Initiator.ADDR;
+            r_lock[I_BufferIndex] <= Initiator.LOCK;
+            r_sel[I_BufferIndex] <= Initiator.SEL;
+            r_tga[I_BufferIndex] <= Initiator.TGA;
+            r_tgc[I_BufferIndex] <= Initiator.TGC;
+            r_we[I_BufferIndex] <= Initiator.WE;
+            r_cti[I_BufferIndex] <= Initiator.CTI;
+            r_bte[I_BufferIndex] <= Initiator.BTE;
+        end else if (i_DroppedCYC)
+        begin
+            // Zero r_cyc on all buffers regardless.  Metastability doesn't matter after abort, and
+            // CYC only legally drops after receiving all ACKs, which requires sending the whole
+            // buffer to the Target
+            for (i = 0; i < 2**BufSzBits; i++)
+                r_cyc[i] <= '0;
+        end
+        // Increment the buffer if we're not stalling.  Increments on the tick Stall resets when
+        // we have waiting input OR a pending relay of a CYC negation.
+        I_BufferIndex <= I_BufferIndex + (!Stall && (i_valid || i_DroppedCYC));
+        // ignore CYC going high when stalling on a dropped CYC. No need to bounce on and off.
+        LastCYC <= Initiator.CYC & ~i_DroppedCYC;
+        // Register that we hit i_DroppedCYC if we're stalled.  This will continue to register
+        // until the stall has passed (Initiator.STALL remains set as long as r_DroppedCYC does).
+        // Once the stall passes, r_DroppedCYC resets, I_BufferIndex increments.
+        //
+        // Note if the next buffer is waiting on an ack or ack reset (not free), the i_DroppedCYC
+        // maintains the Initiator.STALL this cycle, and Stall becomes true next cycle, so the
+        // stall signal to the initiator doesn't deassert.
+        r_DroppedCYC <= Stall && i_DroppedCYC;
+        
+        for (i = 0; i < 2**BufSzBits; i++)
+        begin
+            // Set up for request signal propagation
+                            // if (r_v && T_A) r_v <= '0
+            r_valid[i] <= !(r_valid[i] && T_Acknowledge[i][1])
+                            // else if taking data into current buffer, r_v <= '1
+                            // Also raise r_v when notifying CYC has negated
+                        && (!Stall && (i_valid || i_DroppedCYC) && (i == I_BufferIndex));
+            // Propagate the acknowledgement
+            T_Acknowledge[i][1] <= T_Acknowledge[i][0];
+            T_Acknowledge[i][0] <= r_ack[i]; // XXX:  Have to ack ONLY when Target not stalled
+        end
+    end
+
+    // Propagate I_Request to the Target
+    generate
+    genvar i;
+    for (i=0; i < 2**BufSzBits; i++)
+        always @(posedge S_Target.CLK)
+        begin
+            I_Request[i][1] <= I_Request[i][0];
+            I_Request[i][0] <= r_valid[i];
+        end
+    endgenerate
+    
+    // Receive data and pass to target, if not stalled
+    always @(posedge S_Target.CLK)
+    begin
+        if (I_Request[T_BufferIndex] && !r_ack[i])
+        begin
+            
             r_dat[I_BufferIndex] <= Initiator.DAT_ToTarget;
             r_tgd[I_BufferIndex] <= Initiator.TGD_ToTarget;
             r_addr[I_BufferIndex] <= Initiator.ADDR;
@@ -130,22 +188,10 @@ module WishboneCDCSkidBuffer
             r_cti[I_BufferIndex] <= Initiator.CTI;
             r_bte[I_BufferIndex] <= Initiator.BTE;
         end
-        I_BufferIndex <= I_BufferIndex + (!Stall && i_valid);
     end
-
-    // Propagate I_Request to the Target
-    generate
-    for (i=0; i < 2**BufSzBits; i++)
-        always @(posedge S_Target.CLK)
-        begin
-            I_Request[i][1] <= I_Request[i][0];
-            I_Request[i][0] <= r_valid[i];
-        end
-    endgenerate
     // ================================
-    // == Target ? Initiator buffer ==
+    // == Target -> Initiator buffer ==
     // ================================
-
-    
+        // Initiator receiving from Target
 
 endmodule

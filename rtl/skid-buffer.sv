@@ -142,7 +142,7 @@ module WishboneSkidBuffer
             end else
             begin
                 // if !LOWPOWER this logic gets trimmed because the above is always true.
-                // if LOWPOWER, these become zero when not outputting a valid strobe.
+                // if LOWPOWER, these become zero when not outputting a strobe to avoid latches.
                 T_DAT_O = 0;
                 T_TGD_O = 0;
                 ADDR_O = 0;
