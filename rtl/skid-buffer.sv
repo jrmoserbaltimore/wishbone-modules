@@ -27,58 +27,14 @@ module WishboneSkidBuffer
     localparam SELWidth = DataWidth / Granularity
 )
 (
-    // Common from SYSCON
-    input logic CLK_I,
-    input logic RST_I,
-
-    // Connection to Initiator, i.e. skid buffer is the target
-    // e.g. I[nitiator]_DAT_I[nput]
-    input logic [DataWidth-1:0] I_DAT_I,
-    output logic [DataWidth-1:0] I_DAT_O,
-    input logic [TGDWidth-1:0] I_TGD_I,
-    output logic [TGDWidth-1:0] I_TGD_O,
-
-    output logic ACK_O,
-    input logic [AddressWidth-1:0] ADDR_I,
-    input logic CYC_I,
-    output logic STALL_O,
-    output logic ERR_O,
-    input logic LOCK_I,
-    output logic RTY_O,
-    input logic [SELWidth-1:0] SEL_I,
-    input logic STB_I,
-    input logic [TGAWidth-1:0] TGA_I,
-    input logic [TGCWidth-1:0] TGC_I,
-    input logic WE_I,
-    // Registered Feedback
-    input logic [2:0] CTI_I,
-    input logic [1:0] BTE_I,
-    
-    // Connection to Target, i.e. skid buffer is the initiator
-    input logic [DataWidth-1:0] T_DAT_I,
-    output logic [DataWidth-1:0] T_DAT_O,
-    input logic [TGDWidth-1:0] T_TGD_I,
-    output logic [TGDWidth-1:0] T_TGD_O,
-    
-    input logic ACK_I,
-    output logic [AddressWidth-1:0] ADDR_O,
-    output logic CYC_O,
-    input logic STALL_I,
-    input logic ERR_I,
-    output logic LOCK_O,
-    input logic RTY_I,
-    output logic [SELWidth-1:0] SEL_O,
-    output logic STB_O,
-    output logic [TGAWidth-1:0] TGA_O,
-    output logic [TGCWidth-1:0] TGC_O,
-    output logic WE_O,
-    // Registered Feedback
-    output logic [2:0] CTI_O,
-    output logic [1:0] BTE_O
+    // Common from SYSCON between Initiator and Target
+    IWishbone.Syscon Syscon,
+    IWishbone.Target Initiator,
+    IWishbone.Initiator Target
 );
 
     // Only need to buffer initiator-to-target because only target may stall.
-    // r_valid outputs to CYC_I and STB_I when forwarding the register
+    // r_valid outputs to Initiator.CYC and Initiator.STB when forwarding the register
     logic r_valid;
     logic [DataWidth-1:0] r_dat;
     logic [TGDWidth-1:0] r_tgd;
@@ -92,21 +48,21 @@ module WishboneSkidBuffer
     logic [1:0] r_bte;
 
     logic i_valid, o_valid;
-    assign i_valid = CYC_I & STB_I;
-    assign o_valid = CYC_O & STB_O;
+    assign i_valid = Initiator.CYC & Initiator.STB;
+    assign o_valid = Target.CYC & Target.STB;
 
     // Only stall if buffer is full
-    assign STALL_O = r_valid;
+    assign Initiator.STALL = r_valid;
     // Always send target's output to initiator
-    assign I_DAT_O = T_DAT_I;
-    assign I_TGD_O = T_DAT_I;
-    assign ACK_O = ACK_I;
-    assign ERR_O = ERR_I;
-    assign RTY_O = RTY_I;
+    assign Initiator.DAT_ToInitiator = Target.DAT_ToInitiator;
+    assign Initiator.TGD_ToInitiator = Target.DAT_ToInitiator;
+    assign Initiator.ACK = Target.ACK;
+    assign Initiator.ERR = Target.ERR;
+    assign Initiator.RTY = Target.RTY;
 
-    // XXX: CYC_I should be true whenever r_valid is true, so do I need to OR with r_valid?
-    assign CYC_O = CYC_I | r_valid;
-    assign STB_O = i_valid | r_valid;
+    // XXX: Initiator.CYC should be true whenever r_valid is true, so do I need to OR with r_valid?
+    assign Target.CYC = Initiator.CYC | r_valid;
+    assign Target.STB = i_valid | r_valid;
 
     // assign the inputs or buffer to the outputs
     always_comb
@@ -114,87 +70,87 @@ module WishboneSkidBuffer
         // Put the buffered data on the output bus
         if (r_valid)
         begin
-            T_DAT_O = r_dat;
-            T_TGD_O = r_tgd;
-            ADDR_O = r_addr;
-            LOCK_O = r_lock;
-            SEL_O = r_sel;
-            TGA_O = r_tga;
-            TGC_O = r_tgc;
-            WE_O = r_we;
-            CTI_O = r_cti;
-            BTE_O = r_bte;
+            Target.DAT_ToTarget = r_dat;
+            Target.TGD_ToTarget = r_tgd;
+            Target.ADDR = r_addr;
+            Target.LOCK = r_lock;
+            Target.SEL = r_sel;
+            Target.TGA = r_tga;
+            Target.TGC = r_tgc;
+            Target.WE = r_we;
+            Target.CTI = r_cti;
+            Target.BTE = r_bte;
         end else
         begin
             if (!LOWPOWER || i_valid)
             begin
                 // If LOWPOWER, this checks i_valid; else there is no check and this always happens
-                T_DAT_O = I_DAT_I;
-                T_TGD_O = I_TGD_I;
-                ADDR_O = ADDR_I;
-                LOCK_O = LOCK_I;
-                SEL_O = SEL_I;
-                TGA_O = TGA_I;
-                TGC_O = TGC_I;
-                WE_O = WE_I;
-                CTI_O = CTI_I;
-                BTE_O = BTE_I;
+                Target.DAT_ToTarget = Initiator.DAT_ToTarget;
+                Target.TGD_ToTarget = Initiator.TGD_ToTarget;
+                Target.ADDR = Initiator.ADDR;
+                Target.LOCK = Initiator.LOCK;
+                Target.SEL = Initiator.SEL;
+                Target.TGA = Initiator.TGA;
+                Target.TGC = Initiator.TGC;
+                Target.WE = Initiator.WE;
+                Target.CTI = Initiator.CTI;
+                Target.BTE = Initiator.BTE;
             end else
             begin
                 // if !LOWPOWER this logic gets trimmed because the above is always true.
                 // if LOWPOWER, these become zero when not outputting a strobe to avoid latches.
-                T_DAT_O = 0;
-                T_TGD_O = 0;
-                ADDR_O = 0;
-                LOCK_O = 0;
-                SEL_O = 0;
-                TGA_O = 0;
-                TGC_O = 0;
-                WE_O = 0;
-                CTI_O = 0;
-                BTE_O = 0;
+                Target.DAT_ToTarget = 0;
+                Target.TGD_ToTarget = 0;
+                Target.ADDR = 0;
+                Target.LOCK = 0;
+                Target.SEL = 0;
+                Target.TGA = 0;
+                Target.TGC = 0;
+                Target.WE = 0;
+                Target.CTI = 0;
+                Target.BTE = 0;
             end
         end
     end
 
     // Store the data each clock cycle if not stalling
-    always_ff @(posedge CLK_I)
-    if (!RST_I)
+    always_ff @(posedge Syscon.CLK)
+    if (!Syscon.RST)
     begin
         // if LOWPOWER, these don't get set unless we have CYC&STB.  In all other conditions
         // when LOWPOWER, r_* |=> $last(r_*)  (or is it current r_*?)
         if ((!LOWPOWER || i_valid) && !r_valid)
         begin
-            r_dat <= I_DAT_I;
-            r_tgd <= I_TGD_I;
-            r_addr <= ADDR_I;
-            r_lock <= LOCK_I;
-            r_sel <= SEL_I;
-            r_tga <= TGA_I;
-            r_tgc <= TGC_I;
-            r_we <= WE_I;
-            r_cti <= CTI_I;
-            r_bte <= BTE_I;
+            r_dat <= Initiator.DAT_ToTarget;
+            r_tgd <= Initiator.TGD_ToTarget;
+            r_addr <= Initiator.ADDR;
+            r_lock <= Initiator.LOCK;
+            r_sel <= Initiator.SEL;
+            r_tga <= Initiator.TGA;
+            r_tgc <= Initiator.TGC;
+            r_we <= Initiator.WE;
+            r_cti <= Initiator.CTI;
+            r_bte <= Initiator.BTE;
         end
     end
 
-    always_ff @(posedge CLK_I)
+    always_ff @(posedge Syscon.CLK)
     begin
         // this satisfies all deassertions and clears the buffer 
-        if (RST_I) r_valid <= '0;
-        // Wishbone B4 rule 3.2.0 disallows CYC_O falling before STB_O.  Nothing is said about
-        // dropping before receiving ACK_I, but it's implied that's invalid.   
-        else if (CYC_I)
+        if (Syscon.RST) r_valid <= '0;
+        // Wishbone B4 rule 3.2.0 disallows Target.CYC falling before Target.STB.  Nothing is said about
+        // dropping before receiving Target.ACK, but it's implied that's invalid.   
+        else if (Initiator.CYC)
         begin
-            // Stall hasn't propagated, but incoming data, so buffer
-            if ((i_valid && !STALL_O) && (o_valid && STALL_I))
+            // Stall hasn't propagated, but incoming data, so buffer.
+            if ((i_valid && !Initiator.STALL) && (o_valid && Target.STALL))
             begin
                 r_valid <= '1;
             end else r_valid <= '0;
         end
         // Obviously didn't wait for a bus termination signal but terminated anyway.  If the buffer
         // is tolerant, clear the buffer; else this is trimmed and the bus may do broken things
-        // like hold CYC_O and STB_O with unchanging data until CYC_I is again asserted.  Doing so
+        // like hold Target.CYC and Target.STB with unchanging data until Initiator.CYC is again asserted.  Doing so
         // MIGHT damage hardware!
         else if (!STRICT) r_valid <= '0;
     end
