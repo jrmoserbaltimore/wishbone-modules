@@ -31,23 +31,20 @@ module WishboneCDCSkidBuffer
     // Buffer size is always at least 2
     localparam BufSzBits = $clog2(BufferSize);
 
-    // Initiator -> I_Request[0] -> I_Request[1] -> Target  [Reply: T_Acknowledge]
-    //                    ^                ^         ^
-    //                    ----------------------------S_Target.Clk
-    //                   v                v                   v
-    // Initiator -> I_Acknowledge[0] -> I_Acknowledge[1] -> Target
-    //
-    // Initiator <- T_Request[1] <- T_Request[0] <- Target  [Reply: I_Acknowledge]
-    //     ^               ^               ^
-    // S_Initiator.Clk---------------------
-    //    v               v               v
-    // Initiator <- T_Acknowledge[1] <- T_Acknowledge[0] <- Target
-    logic [1:0] I_Request [BufSzBits-1:0];
-    logic [1:0] I_Acknowledge [BufSzBits-1:0];
-    logic [1:0] T_Request [BufSzBits-1:0];
-    logic [1:0] T_Acknowledge [BufSzBits-1:0];
+    //                                      ---------------------> XOR -> STB 
+    //                                      |                       ^
+    // Initiator -> I_Request[0] -> I_Request[1] -> I_Request[2]----|
+    //                                                              |
+    //                        ---I_Ack[2] <- I_Ack[1] <- I_Ack[0] <-
+    //                       v                 |
+    //         REG<---ACK<--XOR<---------------
 
-    // assign o_valid = CYC_O & STB_O; // ?
+    logic [2:0] I_Request [BufSzBits-1:0];
+    logic [2:0] I_Feedback [BufSzBits-1:0];
+
+    // Pending ACKs, to ensure buffer space to hold all ACKs to be sent by Target
+    logic [BufSzBits:0] T_Pending;
+    wire T_Ready;
     
     // Buffer to which Initiator is writing
     logic [BufSzBits-1:0] I_BufferIndex;
@@ -60,17 +57,13 @@ module WishboneCDCSkidBuffer
     //
     // This skid buffer uses multiple CDCs and multiple buffers in a ring.  Each looks as such:
     //
-    //  r_valid>ff>ff>   
+    //  r_valid>ff>ff>
     //     data>ff——>
-    //      Ack>ff>ff>
     //
-    // Both sides walk around in a ring.  The sender checks if (!r_valid && !Ack) on the current
-    // entry and, if so, sets r_valid and data; upon receiving Ack, it resets r_valid.
-    //
-    // The receiver checks r_valid and, if set, takes the data and sends an Ack.  Upon r_valid
-    // resetting, the receiver resets Ack UNLESS it is in a stall condition.
+    // Both sides walk around in a ring.  When the Target is pending as many acks as the CDC can
+    // buffer, it withholds the strobe and the feedback signal, causing the Initiator to stall when
+    // it reaches that entry in the buffer. 
 
-    // need to have the prior cycle's CYC to test for next cycle.
     // CYC can't drop until after all ACKs are received; regardless, when CYC does drop, all
     // buffers are overwritten with CYC=0, and the CDC stalls until it can actually send a CYC=0
     // request.
@@ -97,15 +90,15 @@ module WishboneCDCSkidBuffer
     logic [2:0] r_cti [BufSzBits-1:0];
     logic [1:0] r_bte [BufSzBits-1:0];
 
-    // Stall whenever the current buffer is not acknowledged clear 
+    // Stall whenever waiting on feedback from current buffer
     wire Stall;
-    assign Stall = r_valid[I_BufferIndex] | T_Acknowledge[1];
+    assign Stall = !(I_Feedback[I_BufferIndex][1] ^ I_Feedback[I_BufferIndex][2]);
     // Stall until 
     assign Initiator.STALL = Stall | i_DroppedCYC;
 
     // Handle the handshake sending from Initiator to Target:
     //  - Set and clear r_valid when appropriate
-    //  - propagate T_Acknowledge
+    //  - propagate I_Feedback
     //  - Propagate Initiator.CYC negation
     always @(posedge S_Initiator.CLK)
     begin
@@ -145,37 +138,53 @@ module WishboneCDCSkidBuffer
         // maintains the Initiator.STALL this cycle, and Stall becomes true next cycle, so the
         // stall signal to the initiator doesn't deassert.
         r_DroppedCYC <= Stall && i_DroppedCYC;
-        
+
+        // If the current buffer is free and we have either a valid input or dropped CYC, so send
+        r_valid[T_BufferIndex] <= (i_valid | i_DroppedCYC) ^ r_valid[T_BufferIndex];
+
+        // Propagate feedback
         for (i = 0; i < 2**BufSzBits; i++)
         begin
-            // Set up for request signal propagation
-                            // if (r_v && T_A) r_v <= '0
-            r_valid[i] <= !(r_valid[i] && T_Acknowledge[i][1])
-                            // else if taking data into current buffer, r_v <= '1
-                            // Also raise r_v when notifying CYC has negated
-                        && (!Stall && (i_valid || i_DroppedCYC) && (i == I_BufferIndex));
-            // Propagate the acknowledgement
-            T_Acknowledge[i][1] <= T_Acknowledge[i][0];
-            T_Acknowledge[i][0] <= r_ack[i]; // XXX:  Have to ack ONLY when Target not stalled
+            I_Feedback[i][2] <= I_Feedback[i][1];
+            I_Feedback[i][1] <= I_Feedback[i][0];
+            I_Feedback[i][0] <= I_Request[i][2];
         end
     end
 
+    // Data is sitting on the current bus and we have room for the ACKs
+    assign T_Ready = (I_Request[T_BufferIndex][1] ^ I_Request[T_BufferIndex][2])
+                     && (T_Pending < 2**BufSzBits);
     // Propagate I_Request to the Target
     generate
     genvar i;
     for (i=0; i < 2**BufSzBits; i++)
         always @(posedge S_Target.CLK)
         begin
+            // Stall the Initiator when:
+            //   - We have as many outstanding ACKs as the buffer will hold; or
+            //   - The current buffer is waiting to send due to Target.STALL 
+            I_Request[i][2] <= (
+                                (T_Ready && !Target.STALL)
+                                && T_BufferIndex == i
+                               )
+                                ? I_Request[i][1]
+                                : I_Request[i][2];
+            // Advance these regardless, stalling at feedback
             I_Request[i][1] <= I_Request[i][0];
             I_Request[i][0] <= r_valid[i];
         end
     endgenerate
-    
-    // Receive data and pass to target, if not stalled
+
+    logic [2:0] T_Request [BufSzBits-1:0];
+    logic [2:0] T_Feedback [BufSzBits-1:0]; 
+    // Receive data and pass to target, if not waiting on buffer space
     always @(posedge S_Target.CLK)
     begin
-        if (I_Request[T_BufferIndex][1] && !r_ack[T_BufferIndex])
+        var i,j;
+        if (T_Ready)
         begin
+            // Always put the data on the bus if valid.  This doesn't create a transition when
+            // stalling
             Target.DAT_ToTarget <= r_dat[T_BufferIndex];
             Target.TGD_ToTarget <= r_tgd[T_BufferIndex];
             Target.ADDR <= r_addr[T_BufferIndex];
@@ -187,23 +196,115 @@ module WishboneCDCSkidBuffer
             Target.CTI <= r_cti[T_BufferIndex];
             Target.BTE <= r_bte[T_BufferIndex];
 
-            // Drop CYC if CYC is negated; else raise CYC and STB
-            Target.CYC <= r_cyc;
-            Target.STB <= r_cyc;            
-            //ACK immediately
-            r_ack[T_BufferIndex] <= '1;
-        end else
-        begin
-            // De-assert ACK only after the request drops and we are NOT stalling
-            r_ack[T_BufferIndex] <= !(Target.STALL || I_Request[T_BufferIndex][1]);
-            // Advance on the tick we drop ACK
-            T_BufferIndex <= T_BufferIndex + !(Target.STALL || I_Request[T_BufferIndex][1]);
-            // Drop STB when dropping ACK
-            Target.STB <= !(Target.STALL || I_Request[T_BufferIndex][1]);
-        end        
+            // Raise and drop CYC only when instructed, hold otherwise
+            Target.CYC <= r_cyc[T_BufferIndex];
+        end
+        // Strobe whenever data is ready and CYC is asserted
+        Target.STB <= T_Ready && r_cyc[T_BufferIndex];
+        // Increment T_Pending and T_BufferIndex each time we SEND data to the Target.
+        // Decrement T_Pending each time we receive an ACK from the target and relay feedback.
+        j = 0;
+        for (i = 0; i < 2**BufSzBits; i++)
+            j += T_Feedback[2] ^ T_Feedback[1];
+        // If sending !CYC, there are no pending responses.
+        T_Pending <= !r_cyc[T_BufferIndex]
+                     ? '0
+                     : T_Pending + (T_Ready && !Target.STALL) - j;
+        T_BufferIndex <= T_BufferIndex + (T_Ready && !Target.STALL); 
     end
     // ================================
     // == Target -> Initiator buffer ==
     // ================================
     // Initiator receiving from Target
+
+    // Buffer from which Initiator is reading
+    logic [BufSzBits-1:0] I_TBufferIndex;
+    // Buffer to which Target is writing
+    logic [BufSzBits-1:0] T_TBufferIndex;
+
+    // Buffer only collects what's coming from Target
+    logic t_valid [BufferSize-1:0];
+    logic [DataWidth-1:0] t_dat [BufferSize-1:0];
+    logic [TGDWidth-1:0] t_tgd [BufferSize-1:0];
+    logic t_ack [BufferSize-1:0];
+    logic t_err [BufferSize-1:0];
+    logic t_rty [BufferSize-1:0];
+    
+    wire ti_valid;
+    wire I_Ready;
+    assign ti_valid = Target.ACK | Target.ERR | Target.RTY;
+
+    assign I_Ready = (T_Request[I_TBufferIndex][1] ^ T_Request[I_TBufferIndex][2]);
+
+    wire [DataWidth-1:0] t_DAT;
+    wire [TGDWidth-1:0] t_TGD;
+    wire t_ACK, t_ERR, t_RTY;
+
+    assign t_DAT = t_dat[I_TBufferIndex];
+    assign t_TGD = t_tgd[I_TBufferIndex];
+    // Block these until the request reaches the Initiator
+    assign t_ACK = t_ack[I_TBufferIndex] & I_Ready;
+    assign t_ERR = t_err[I_TBufferIndex] & I_Ready;
+    assign t_RTY = t_rty[I_TBufferIndex] & I_Ready;
+    
+    // handles the handshake sending from target to initiator:
+    //  - set and clear t_valid when appropriate
+    //  - Propagate T_Feedback
+    always @(posedge S_Target.CLK)
+    begin
+        var i;
+        // Store a new input into the buffer to make it available to the Initiator
+        // There is NO STALL CONDITION.  The Initiator stalls when the Target hasn't received
+        // feedback on relaying an ACK after a full return buffer, and the Target shouldn't have
+        // any responses pending until the buffer is not full.
+        if (ti_valid)
+        begin
+            t_valid[T_TBufferIndex] <= ~t_valid[T_TBufferIndex];
+            t_dat[T_TBufferIndex] <= Target.DAT_ToInitiator;
+            t_tgd[T_TBufferIndex] <= Target.TGD_ToInitiator;
+            t_ack[T_TBufferIndex] <= Target.ACK;
+            t_err[T_TBufferIndex] <= Target.RTY;
+            t_rty[T_TBufferIndex] <= Target.RTY;
+        end
+        // We sent something back, so increment the buffer index
+        T_TBufferIndex <= T_TBufferIndex + ti_valid;
+        t_valid[T_BufferIndex] <= ti_valid  ^ t_valid[T_BufferIndex];
+
+        // Propagate feedback
+        for (i = 0; i < 2**BufSzBits; i++)
+        begin
+            T_Feedback[i][2] <= T_Feedback[i][1];
+            T_Feedback[i][1] <= T_Feedback[i][0];
+            T_Feedback[i][0] <= T_Request[i][2];
+        end
+    end
+
+    // Propagate T_Request to the Initiator
+    generate
+    for (i=0; i < 2**BufSzBits; i++)
+        always @(posedge S_Initiator.CLK)
+        begin
+            T_Request[i][2] <= T_Request[i][1];
+            T_Request[i][1] <= I_Request[i][0];
+            T_Request[i][0] <= r_valid[i];
+        end
+    endgenerate
+    
+    // Receive data and pass to Initiator
+    always @(posedge S_Initiator.CLK)
+    begin
+        var i,j;
+        if (I_Ready)
+        begin
+            Initiator.DAT_ToInitiator <= t_DAT;
+            Initiator.TGD_ToInitiator <= t_TGD;
+        end
+        // These remain 0 until I_Ready
+        Initiator.ACK <= t_ACK;
+        Initiator.ERR <= t_ERR;
+        Initiator.RTY <= t_RTY;
+
+        // Just sent data to the Initiator, next.
+        I_TBufferIndex <= I_TBufferIndex + I_Ready; 
+    end
 endmodule
