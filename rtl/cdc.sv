@@ -7,29 +7,31 @@
 //
 // This is only applicable to pipeline mode.
 
-module WishboneCDCSkidBuffer
+module WishboneCDCFIFO
 #(
     parameter AddressWidth = 16,
-    parameter DataWidth = 8, // bits, 8, 16, 32, or 64
-    parameter Granularity = 8, // bits, 8, 16, 32, or 64
-    parameter TGDWidth = 1, // Tag data width
-    parameter TGAWidth = 1,
-    parameter TGCWidth = 1,
-    parameter BufferSize = 4, // For a slow Initiator to fast Target, 4 is a clear pipeline.
+    parameter DataWidth = 64, // bits, 8, 16, 32, or 64
+    parameter Granularity = 64, // bits, 8, 16, 32, or 64
+    parameter TGDWidth = 0, // Tag data width
+    parameter TGAWidth = 0,
+    parameter TGCWidth = 0,
+    parameter BufferSize = 8, // For a slow Initiator to fast Target, 4 is a clear pipeline.
                               // For a fast Initiator
     parameter LOWPOWER = 1, // Reduces register transitions
     parameter STRICT = 0, // If set, the bus doesn't clean up after invalid inputs
+    parameter RegisteredFeedback = 0,
     localparam SELWidth = DataWidth / Granularity
 )
 (
     // Common from SYSCON
-    IWishbone.Syscon S_Initiator,
-    IWishbone.Syscon S_Target,
+    IWishbone.SysCon S_Initiator,
+    IWishbone.SysCon S_Target,
     IWishbone.Target Initiator,
     IWishbone.Initiator Target
 );
     // Buffer size is always at least 2
     localparam BufSzBits = $clog2(BufferSize);
+    localparam BufSz = 2**BufSzBits;
 
     //                                      ---------------------> XOR -> STB 
     //                                      |                       ^
@@ -39,8 +41,8 @@ module WishboneCDCSkidBuffer
     //                       v                 |
     //         REG<---ACK<--XOR<---------------
 
-    logic [2:0] I_Request [BufSzBits-1:0];
-    logic [2:0] I_Feedback [BufSzBits-1:0];
+    logic [2:0] I_Request [BufSz-1:0];
+    logic [2:0] I_Feedback [BufSz-1:0];
 
     // Pending ACKs, to ensure buffer space to hold all ACKs to be sent by Target
     logic [BufSzBits:0] T_Pending;
@@ -75,20 +77,20 @@ module WishboneCDCSkidBuffer
     assign i_DroppedCYC = (LastCYC & ~Initiator.CYC) | r_DroppedCYC;
 
     // r_valid indicates something has crossed
-    logic r_valid [BufSzBits-1:0];
-    logic r_ack [BufSzBits-1:0];
+    logic r_valid [BufSz-1:0];
+    logic r_ack [BufSz-1:0];
     // Need to actually propagate cyc; stb is implicit
-    logic r_cyc [BufSzBits-1:0];
-    logic [DataWidth-1:0] r_dat [BufSzBits-1:0];
-    logic [TGDWidth-1:0] r_tgd [BufSzBits-1:0];
-    logic [AddressWidth-1:0] r_addr [BufSzBits-1:0];
-    logic r_lock [BufSzBits-1:0];
-    logic [SELWidth-1:0] r_sel [BufSzBits-1:0];
-    logic [TGAWidth-1:0] r_tga [BufSzBits-1:0];
-    logic [TGCWidth-1:0] r_tgc [BufSzBits-1:0];
-    logic r_we [BufSzBits-1:0];
-    logic [2:0] r_cti [BufSzBits-1:0];
-    logic [1:0] r_bte [BufSzBits-1:0];
+    logic r_cyc [BufSz-1:0];
+    logic [DataWidth-1:0] r_dat [BufSz-1:0];
+    logic [TGDWidth-1:0] r_tgd [BufSz-1:0];
+    logic [AddressWidth-1:0] r_addr [BufSz-1:0];
+    logic r_lock [BufSz-1:0];
+    logic [SELWidth-1:0] r_sel [BufSz-1:0];
+    logic [TGAWidth-1:0] r_tga [BufSz-1:0];
+    logic [TGCWidth-1:0] r_tgc [BufSz-1:0];
+    logic r_we [BufSz-1:0];
+    logic [2:0] r_cti [BufSz-1:0];
+    logic [1:0] r_bte [BufSz-1:0];
 
     // Stall whenever waiting on feedback from current buffer
     wire Stall;
@@ -102,27 +104,29 @@ module WishboneCDCSkidBuffer
     //  - Propagate Initiator.CYC negation
     always @(posedge S_Initiator.CLK)
     begin
-        var i;
         // Store a new input into the buffer to make it available to the Target
         if (!Stall && i_valid && !i_DroppedCYC)
         begin
             r_cyc[I_BufferIndex] <= Initiator.CYC;
             r_dat[I_BufferIndex] <= Initiator.DAT_ToTarget;
-            r_tgd[I_BufferIndex] <= Initiator.TGD_ToTarget;
+            if (TGDWidth > 0) r_tgd[I_BufferIndex] <= Initiator.TGD_ToTarget;
             r_addr[I_BufferIndex] <= Initiator.ADDR;
             r_lock[I_BufferIndex] <= Initiator.LOCK;
             r_sel[I_BufferIndex] <= Initiator.SEL;
-            r_tga[I_BufferIndex] <= Initiator.TGA;
-            r_tgc[I_BufferIndex] <= Initiator.TGC;
+            if (TGAWidth > 0) r_tga[I_BufferIndex] <= Initiator.TGA;
+            if (TGCWidth > 0) r_tgc[I_BufferIndex] <= Initiator.TGC;
             r_we[I_BufferIndex] <= Initiator.WE;
-            r_cti[I_BufferIndex] <= Initiator.CTI;
-            r_bte[I_BufferIndex] <= Initiator.BTE;
+            if (RegisteredFeedback)
+            begin
+                r_cti[I_BufferIndex] <= Initiator.CTI;
+                r_bte[I_BufferIndex] <= Initiator.BTE;
+            end
         end else if (i_DroppedCYC)
         begin
             // Zero r_cyc on all buffers regardless.  Metastability doesn't matter after abort, and
             // CYC only legally drops after receiving all ACKs, which requires sending the whole
             // buffer to the Target
-            for (i = 0; i < 2**BufSzBits; i++)
+            for (int i = 0; i < 2**BufSzBits; i++)
                 r_cyc[i] <= '0;
         end
         // Increment the buffer if we're not stalling.  Increments on the tick Stall resets when
@@ -143,7 +147,7 @@ module WishboneCDCSkidBuffer
         r_valid[T_BufferIndex] <= (i_valid | i_DroppedCYC) ^ r_valid[T_BufferIndex];
 
         // Propagate feedback
-        for (i = 0; i < 2**BufSzBits; i++)
+        for (int i = 0; i < BufSz; i++)
         begin
             I_Feedback[i][2] <= I_Feedback[i][1];
             I_Feedback[i][1] <= I_Feedback[i][0];
@@ -153,11 +157,11 @@ module WishboneCDCSkidBuffer
 
     // Data is sitting on the current bus and we have room for the ACKs
     assign T_Ready = (I_Request[T_BufferIndex][1] ^ I_Request[T_BufferIndex][2])
-                     && (T_Pending < 2**BufSzBits);
+                     && (T_Pending < BufSz);
     // Propagate I_Request to the Target
     generate
     genvar i;
-    for (i=0; i < 2**BufSzBits; i++)
+    for (i = 0; i < BufSz; i++)
         always @(posedge S_Target.CLK)
         begin
             // Stall the Initiator when:
@@ -175,26 +179,29 @@ module WishboneCDCSkidBuffer
         end
     endgenerate
 
-    logic [2:0] T_Request [BufSzBits-1:0];
-    logic [2:0] T_Feedback [BufSzBits-1:0]; 
+    logic [2:0] T_Request [BufSz-1:0];
+    logic [2:0] T_Feedback [BufSz-1:0]; 
     // Receive data and pass to target, if not waiting on buffer space
     always @(posedge S_Target.CLK)
     begin
-        var i,j;
+        var int j;
         if (T_Ready)
         begin
             // Always put the data on the bus if valid.  This doesn't create a transition when
             // stalling
             Target.DAT_ToTarget <= r_dat[T_BufferIndex];
-            Target.TGD_ToTarget <= r_tgd[T_BufferIndex];
+            if (TGDWidth > 0 ) Target.TGD_ToTarget <= r_tgd[T_BufferIndex];
             Target.ADDR <= r_addr[T_BufferIndex];
             Target.LOCK <= r_lock[T_BufferIndex];
             Target.SEL <= r_sel[T_BufferIndex];
-            Target.TGA <= r_tga[T_BufferIndex];
-            Target.TGC <= r_tgc[T_BufferIndex];
+            if (TGAWidth > 0) Target.TGA <= r_tga[T_BufferIndex];
+            if (TGCWidth > 0) Target.TGC <= r_tgc[T_BufferIndex];
             Target.WE <= r_we[T_BufferIndex];
-            Target.CTI <= r_cti[T_BufferIndex];
-            Target.BTE <= r_bte[T_BufferIndex];
+            if (RegisteredFeedback)
+            begin
+                Target.CTI <= r_cti[T_BufferIndex];
+                Target.BTE <= r_bte[T_BufferIndex];
+            end
 
             // Raise and drop CYC only when instructed, hold otherwise
             Target.CYC <= r_cyc[T_BufferIndex];
@@ -204,8 +211,8 @@ module WishboneCDCSkidBuffer
         // Increment T_Pending and T_BufferIndex each time we SEND data to the Target.
         // Decrement T_Pending each time we receive an ACK from the target and relay feedback.
         j = 0;
-        for (i = 0; i < 2**BufSzBits; i++)
-            j += T_Feedback[2] ^ T_Feedback[1];
+        for (int i = 0; i < BufSz; i++)
+            j += T_Feedback[i][2] ^ T_Feedback[i][1];
         // If sending !CYC, there are no pending responses.
         T_Pending <= !r_cyc[T_BufferIndex]
                      ? '0
@@ -223,12 +230,12 @@ module WishboneCDCSkidBuffer
     logic [BufSzBits-1:0] T_TBufferIndex;
 
     // Buffer only collects what's coming from Target
-    logic t_valid [BufferSize-1:0];
-    logic [DataWidth-1:0] t_dat [BufferSize-1:0];
-    logic [TGDWidth-1:0] t_tgd [BufferSize-1:0];
-    logic t_ack [BufferSize-1:0];
-    logic t_err [BufferSize-1:0];
-    logic t_rty [BufferSize-1:0];
+    logic t_valid [BufSz-1:0];
+    logic [DataWidth-1:0] t_dat [BufSz-1:0];
+    logic [TGDWidth-1:0] t_tgd [BufSz-1:0];
+    logic t_ack [BufSz-1:0];
+    logic t_err [BufSz-1:0];
+    logic t_rty [BufSz-1:0];
     
     wire ti_valid;
     wire I_Ready;
@@ -252,7 +259,6 @@ module WishboneCDCSkidBuffer
     //  - Propagate T_Feedback
     always @(posedge S_Target.CLK)
     begin
-        var i;
         // Store a new input into the buffer to make it available to the Initiator
         // There is NO STALL CONDITION.  The Initiator stalls when the Target hasn't received
         // feedback on relaying an ACK after a full return buffer, and the Target shouldn't have
@@ -261,7 +267,7 @@ module WishboneCDCSkidBuffer
         begin
             t_valid[T_TBufferIndex] <= ~t_valid[T_TBufferIndex];
             t_dat[T_TBufferIndex] <= Target.DAT_ToInitiator;
-            t_tgd[T_TBufferIndex] <= Target.TGD_ToInitiator;
+            if (TGDWidth > 0) t_tgd[T_TBufferIndex] <= Target.TGD_ToInitiator;
             t_ack[T_TBufferIndex] <= Target.ACK;
             t_err[T_TBufferIndex] <= Target.RTY;
             t_rty[T_TBufferIndex] <= Target.RTY;
@@ -271,7 +277,7 @@ module WishboneCDCSkidBuffer
         t_valid[T_BufferIndex] <= ti_valid  ^ t_valid[T_BufferIndex];
 
         // Propagate feedback
-        for (i = 0; i < 2**BufSzBits; i++)
+        for (int i = 0; i < BufSz; i++)
         begin
             T_Feedback[i][2] <= T_Feedback[i][1];
             T_Feedback[i][1] <= T_Feedback[i][0];
@@ -281,7 +287,7 @@ module WishboneCDCSkidBuffer
 
     // Propagate T_Request to the Initiator
     generate
-    for (i=0; i < 2**BufSzBits; i++)
+    for (i = 0; i < BufSz; i++)
         always @(posedge S_Initiator.CLK)
         begin
             T_Request[i][2] <= T_Request[i][1];
@@ -293,11 +299,10 @@ module WishboneCDCSkidBuffer
     // Receive data and pass to Initiator
     always @(posedge S_Initiator.CLK)
     begin
-        var i,j;
         if (I_Ready)
         begin
             Initiator.DAT_ToInitiator <= t_DAT;
-            Initiator.TGD_ToInitiator <= t_TGD;
+            if (TGDWidth > 0) Initiator.TGD_ToInitiator <= t_TGD;
         end
         // These remain 0 until I_Ready
         Initiator.ACK <= t_ACK;
