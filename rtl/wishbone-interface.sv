@@ -15,7 +15,7 @@ interface IWishbone
 );
     // Common from SYSCON
     logic CLK;
-    logic RST;
+    logic RST = '0;
 
     // Target signals
     logic [DataWidth-1:0] DAT_ToInitiator;
@@ -26,7 +26,9 @@ interface IWishbone
     logic ACK;
     logic [AddressWidth-1:0] ADDR;
     logic CYC;
-    logic STALL;
+    wire STALL;
+    logic ForceStall;
+    logic InternalStall;
     logic ERR;
     logic LOCK;
     logic RTY;
@@ -38,7 +40,146 @@ interface IWishbone
     // Registered Feedback
     logic [2:0] CTI;
     logic [1:0] BTE;
+
+    assign STALL = ForceStall | InternalStall;
+
+    // Hold the last response
+    // XXX:  Is there any point to buffering?
+    //logic [DataWidth-1:0] LastResponseBuffer;
+    //wire LatestDAT_ToInitiator = ACK ? DAT_ToInitiator : LastResponseBuffer;
+    //logic [TGDWidth-1:0] LastTGDBuffer;
+
+    //logic ACKBuffer;
+    //logic ERRBuffer;
+    //logic RTYBuffer;
+
+    // Initiator run every cycle
+    task Prepare();
+        //if (ACK) LastResponseBuffer <= DAT_ToInitiator;
+        //if (ACK) LastTGDBuffer <= TGD_ToInitiator;
+        //ACKBuffer <= ACK || ACKBuffer;
+        //ERRBuffer <= ERR || ERRBuffer;
+        //RTYBuffer <= RTY || RTYBuffer;
+        STB <= STB & Stalled();
+    endtask
+
+    task Open();
+        CYC <= '1;
+        STB <= '0;
+    endtask
     
+    task Close();
+        CYC <= '0;
+        STB <= '0;
+    endtask
+    
+    task SendData
+    (
+        input logic [AddressWidth-1:0] Address,
+        input logic [DataWidth-1:0] Data,
+        input logic [TGDWidth-1:0] TGD_o = '0,
+        input logic [TGAWidth-1:0] TGA_o = '0,
+        input logic [TGCWidth-1:0] TGC_o = '0,
+        input logic [SELWidth-1:0] SEL_o = -1
+    );
+        ADDR <= Address;
+        DAT_ToTarget <= Data;
+        TGD_ToTarget <= TGD_o;
+        TGA <= TGA_o;
+        TGC <= TGC_o;
+        WE <= '1;
+        SEL <= SEL_o;
+        STB <= '1;
+        
+        //ACKBuffer <= '0;
+        //ERRBuffer <= '0;
+        //RTYBuffer <= '0;
+    endtask
+    
+    task RequestData
+    (
+        input logic [AddressWidth-1:0] Address,
+        input logic [TGDWidth-1:0] TGD_o = '0,
+        input logic [TGAWidth-1:0] TGA_o = '0,
+        input logic [TGCWidth-1:0] TGC_o = '0
+    );
+        ADDR <= Address;
+        TGD_ToTarget <= TGD_o;
+        TGA <= TGA_o;
+        TGC <= TGC_o;
+        WE <= '0;
+        STB <= '1;
+    endtask
+
+    function bit Stalled();
+        return STALL;
+    endfunction
+
+    function bit ResponseReady();
+        return ACK; // ? ACK : ACKBuffer;
+    endfunction
+    
+    function bit ReceivedRetry();
+        return RTY; // ? RTY : RTYBuffer;
+    endfunction
+    
+    function bit ReceivedError();
+        return ERR; // ? ERR : ERRBuffer;
+    endfunction
+
+    // does not check if a response has been received
+    function logic [DataWidth-1:0] GetResponse();
+        //ACKBuffer <= '0;
+        return DAT_ToInitiator; // ACK ? DAT_ToInitiator : LastResponseBuffer; 
+    endfunction;
+    
+    function logic [TGDWidth-1:0] GetResponseTGD();
+        return TGD_ToInitiator; //ACK ? TGD_ToInitiator : LastTGDBuffer;
+    endfunction
+    
+    // Target run every cycle
+    task PrepareResponse();
+        ACK <= '0;
+        ERR <= '0;
+        RTY <= '0;
+    endtask
+    
+    function RequestReady();
+        return STB & CYC;
+    endfunction
+    
+    task SendResponse
+    (
+        input logic [DataWidth-1:0] Data,
+        input logic [TGDWidth-1:0] TGD_o = '0
+    );
+        DAT_ToInitiator <= Data;
+        TGD_ToInitiator <= TGD_o;
+        ACK <= '1;
+        ERR <= '0;
+        RTY <= '0;
+    endtask
+    
+    task SendError();
+        ACK <= '0;
+        ERR <= '1;
+        RTY <= '0;
+    endtask
+    
+    task SendRetry();
+        ACK <= '0;
+        ERR <= '0;
+        RTY <= '1;
+    endtask
+    
+    task Stall();
+        InternalStall <= '1;
+    endtask
+    
+    task Unstall();
+        InternalStall  <= '0;
+    endtask
+
     modport SysCon
     (
         input CLK,
@@ -53,8 +194,8 @@ interface IWishbone
         output TGD_ToTarget,
         
         // Bus control
-        output CYC,
-        output STB,
+        output CYC, // XXX Remove
+        output STB, // XXX Remove
         output LOCK,
 
         // Command
@@ -74,7 +215,17 @@ interface IWishbone
         input ACK,
         input ERR,
         input RTY,
-        input STALL
+        input STALL,
+        import Prepare,
+        import Open,
+        import SendData,
+        import RequestData,
+        import Stalled,
+        import ResponseReady,
+        import ReceivedRetry,
+        import ReceivedError,
+        import GetResponse,
+        import GetResponseTGD
     );
 
     modport Target
@@ -106,6 +257,15 @@ interface IWishbone
         output ACK,
         output ERR,
         output RTY,
-        output STALL
+        output STALL,
+        output ForceStall,
+        import PrepareResponse,
+        import RequestReady,
+        import SendResponse,
+        import SendError,
+        import SendRetry,
+        import Stall,
+        import Unstall
     );
+
 endinterface
