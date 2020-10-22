@@ -17,63 +17,54 @@ module WishboneBRAM
     generate
     if (DeviceType == "Xilinx")
     begin: Xilinx_BRAM_Inferred
-        //  Xilinx Single Port Byte-Write Read First RAM
-        //  This code implements a parameterizable single-port byte-write read-first memory where when data
-        //  is written to the memory, the output reflects the prior contents of the memory location.
-        //  If a reset or enable is not necessary, it may be tied off or removed from the code.
-        //  Modify the parameters for the desired RAM characteristics.
+        localparam RAM_WIDTH = DataWidth + (DataWidth / 8);
+        localparam RAM_DEPTH = 1 << AddressWidth;                     //  (number of entries)
+        localparam RAM_PERFORMANCE = "LOW_LATENCY"; // Select "HIGH_PERFORMANCE" or "LOW_LATENCY" 
 
-        localparam NB_COL = DataWidth / 8;            // Specify number of columns (number of bytes)
-        localparam COL_WIDTH = 8 + Parity;                   // Specify column width (byte width + parity bit)
-        localparam RAM_DEPTH = 2**AddressWidth;   // Specify RAM depth (number of entries)
+        reg [RAM_WIDTH-1:0] BRAM [RAM_DEPTH-1:0];
+        reg [RAM_WIDTH-1:0] ram_data = {RAM_WIDTH{1'b0}};
 
-        // Uninitialized
-        logic [(NB_COL*COL_WIDTH)-1:0] Bram [RAM_DEPTH-1:0];
-        //logic [(NB_COL*COL_WIDTH)-1:0] BramData = {(NB_COL*COL_WIDTH){1'b0}};
-
-        // Always returns the data on the next clock cycle, no stall    
-        always @(posedge SysCon.CLK)
-        if (SysCon.RST)
-        begin
-            Initiator.PrepareResponse();
-            Initiator.Unstall();
-        end else
-        begin
-            Initiator.PrepareResponse();
-            Initiator.ACK <= Initiator.RequestReady();
+        // The following code either initializes the memory values to a specified file or to all zeros to match hardware
+      
+        begin: init_bram_to_zero
+            integer ram_index;
+            initial
+            for (ram_index = 0; ram_index < RAM_DEPTH; ram_index = ram_index + 1)
+                BRAM[ram_index] = {RAM_WIDTH{1'b0}};
         end
-        
-        genvar i;
-        for (i = 0; i < NB_COL; i = i+1) begin: byte_write
-            // Parity is adjacent to the byte to avoid complicated computations of how many parity
-            // bits there are, instead computing where the parity bits are.
-            // xxxxxxxxPxxxxxxxxP…
-            // Parity storage and TGD lines are trimmed out if !Parity
+
+        always @(posedge SysCon.CLK)
+        if (Initiator.RequestReady()) begin
+            if (Initiator.WE)
+                BRAM[Initiator.ADDR] <= {Initiator.GetRequest(), Initiator.GetRequestTGD()};
+            ram_data <= BRAM[Initiator.ADDR];
+        end
+
+    //  The following code generates HIGH_PERFORMANCE (use output register) or LOW_LATENCY (no output register)
+  
+        begin: no_output_register
+
+            // Always returns the data on the next clock cycle, no stall    
             always @(posedge SysCon.CLK)
-            if (Initiator.CYC && Initiator.STB && Initiator.SEL[i])
+            if (SysCon.RST)
             begin
-                // Organizing under the CYC & STB & SEL[i] test allows a 6-LUT output to select
-                // between read and write.  Eliminating the else clause would use the above three
-                // and not the WE for data reads, saving nothing since we still need two signls
-                // to indicate whether anything is done and whether writing is done.  Moving the
-                // read clause outside CYC & STB & SEL[i] would reduce usage to a 4-LUT and reclaim
-                // a wire, at the expense of more transitions (dynamic power usage). 
-                if (Initiator.WE)
-                begin
-                    // Extract data and parity
-                    if (Parity) Bram[Initiator.ADDR][i*COL_WIDTH] <= Initiator.TGD_ToTarget[i];
-                    Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+Parity]
-                      <= Initiator.DAT_ToTarget[(i+1)*(COL_WIDTH-Parity)-1:i*(COL_WIDTH-Parity)];
-                end else
-                begin
-                    if (Parity) Initiator.TGD_ToInitiator[i] <= Bram[Initiator.ADDR][i*COL_WIDTH];
-                    Initiator.DAT_ToInitiator[(i+1)*(COL_WIDTH-Parity)-1:i*(COL_WIDTH-Parity)]
-                      <= Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+Parity];
-                end
+                Initiator.PrepareResponse();
+                Initiator.Unstall();
+            end else
+            begin
+                Initiator.PrepareResponse();
+                if (Initiator.RequestReady()) Initiator.SendResponse(BRAM[Initiator.ADDR]);
             end
         end
     end
     endgenerate
+
+  //  The following function calculates the address width based on specified RAM depth
+  function integer clogb2;
+    input integer depth;
+      for (clogb2=0; depth>0; clogb2=clogb2+1)
+        depth = depth >> 1;
+  endfunction
 
 `ifdef FORMAL
     
