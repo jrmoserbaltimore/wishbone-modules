@@ -3,6 +3,12 @@
 //
 // License: MIT
 
+interface ISysCon;
+    // Common from SYSCON
+    logic CLK;
+    logic RST;
+endinterface
+
 interface IWishbone
 #(
     parameter AddressWidth = 16,
@@ -13,10 +19,6 @@ interface IWishbone
     parameter TGCWidth = 1,
     localparam SELWidth = DataWidth / Granularity
 );
-    // Common from SYSCON
-    logic CLK;
-    logic RST;
-
     // Target signals
     logic [DataWidth-1:0] DAT_ToInitiator;
     logic [DataWidth-1:0] DAT_ToTarget;
@@ -169,12 +171,6 @@ interface IWishbone
         InternalStall  <= '0;
     endtask
 
-    modport SysCon
-    (
-        input CLK,
-        input RST
-    );
-    
     modport Initiator
     (
         input DAT_ToInitiator,
@@ -246,7 +242,6 @@ interface IWishbone
         output ACK,
         output ERR,
         output RTY,
-        output STALL,
         output ForceStall,
         import PrepareResponse,
         import RequestReady,
@@ -256,7 +251,8 @@ interface IWishbone
         import SendError,
         import SendRetry,
         import Stall,
-        import Unstall
+        import Unstall,
+        import Stalled
     );
 
 endinterface

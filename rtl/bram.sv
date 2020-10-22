@@ -9,7 +9,7 @@ module WishboneBRAM
     parameter DeviceType = "Xilinx"
 )
 (
-    IWishbone.SysCon SysCon,
+    ISysCon SysCon,
     IWishbone.Target Initiator
 );
     assign Initiator.ForceStall = '0;
@@ -31,6 +31,18 @@ module WishboneBRAM
         logic [(NB_COL*COL_WIDTH)-1:0] Bram [RAM_DEPTH-1:0];
         //logic [(NB_COL*COL_WIDTH)-1:0] BramData = {(NB_COL*COL_WIDTH){1'b0}};
 
+        // Always returns the data on the next clock cycle, no stall    
+        always @(posedge SysCon.CLK)
+        if (SysCon.RST)
+        begin
+            Initiator.PrepareResponse();
+            Initiator.Unstall();
+        end else
+        begin
+            Initiator.PrepareResponse();
+            Initiator.ACK <= Initiator.RequestReady();
+        end
+        
         genvar i;
         for (i = 0; i < NB_COL; i = i+1) begin: byte_write
             // Parity is adjacent to the byte to avoid complicated computations of how many parity
@@ -59,18 +71,6 @@ module WishboneBRAM
                       <= Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+Parity];
                 end
             end
-        end
-
-        // Always returns the data on the next clock cycle, no stall    
-        always @(posedge SysCon.CLK)
-        if (SysCon.RST)
-        begin
-            Initiator.PrepareResponse();
-            Initiator.Unstall();
-        end else
-        begin
-            Initiator.PrepareResponse();
-            Initiator.ACK <= Initiator.RequestReady();
         end
     end
     endgenerate

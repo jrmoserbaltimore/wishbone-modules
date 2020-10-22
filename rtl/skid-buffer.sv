@@ -28,15 +28,31 @@ module WishboneSkidBuffer
 )
 (
     // Common from SYSCON between Initiator and Target
-    IWishbone.SysCon SysCon,
+    ISysCon SysCon,
     IWishbone.Target Initiator,
     IWishbone.Initiator Target
 );
 
     localparam BufferBits = $clog2(BufferSize) ? $clog2(BufferSize) : '1;
 
+    typedef struct
+    {
+        logic cyc;
+        logic [DataWidth-1:0] dat;
+        logic [TGDWidth-1:0] tgd;
+        logic [AddressWidth-1:0] addr;
+        logic lock;
+        logic [SELWidth-1:0] sel;
+        logic [TGAWidth-1:0] tga;
+        logic [TGCWidth-1:0] tgc;
+        logic we;
+        logic [2:0] cti;
+        logic [1:0] bte;
+    } I_Buffer;
     // Only need to buffer initiator-to-target because only target may stall.
     logic r_valid [BufferSize-1:0];
+    I_Buffer i_buf [BufferSize-1:0];
+
     logic r_cyc;
     logic [DataWidth-1:0] r_dat [BufferSize-1:0];
     logic [TGDWidth-1:0] r_tgd [BufferSize-1:0];
@@ -64,6 +80,7 @@ module WishboneSkidBuffer
     wire w_bte;
 
     assign w_valid = r_valid[BufferIndex];
+    /*
     assign w_dat = r_dat[BufferIndex];
     assign w_tgd = r_tgd[BufferIndex];
     assign w_addr = r_addr[BufferIndex];
@@ -73,7 +90,16 @@ module WishboneSkidBuffer
     assign w_tgc = r_tgc[BufferIndex];
     assign w_cti = r_cti[BufferIndex];
     assign w_bte = r_bte[BufferIndex];
-
+    */
+    assign w_dat = i_buf[BufferIndex].dat;
+    assign w_tgd = i_buf[BufferIndex].tgd;
+    assign w_addr = i_buf[BufferIndex].addr;
+    assign w_lock = i_buf[BufferIndex].lock; 
+    assign w_sel = i_buf[BufferIndex].sel;
+    assign w_tga = i_buf[BufferIndex].tga;
+    assign w_tgc = i_buf[BufferIndex].tgc;
+    assign w_cti = i_buf[BufferIndex].cti;
+    assign w_bte = i_buf[BufferIndex].bte;
     logic i_valid, o_valid;
     assign o_valid = Target.CYC & Target.STB;
 
