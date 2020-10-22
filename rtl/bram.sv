@@ -3,16 +3,16 @@
 
 module WishboneBRAM
 #(
-    parameter AddressBusWidth = 12,  // number of DataBusWidth entries (partial address decoding)
-    parameter DataBusWidth = 8, // 8, 16, 32, 64
+    parameter AddressWidth = 12,  // number of DataBusWidth entries (partial address decoding)
+    parameter DataWidth = 8, // 8, 16, 32, 64
     parameter Parity = 1,
     parameter DeviceType = "Xilinx"
 )
 (
-    IWishbone.SysCon System,
+    IWishbone.SysCon SysCon,
     IWishbone.Target Initiator
 );
-    assign Initiator.STALL = '0;
+    assign Initiator.ForceStall = '0;
 
     generate
     if (DeviceType == "Xilinx")
@@ -23,9 +23,9 @@ module WishboneBRAM
         //  If a reset or enable is not necessary, it may be tied off or removed from the code.
         //  Modify the parameters for the desired RAM characteristics.
 
-        localparam NB_COL = DataBusWidth;            // Specify number of columns (number of bytes)
-        localparam COL_WIDTH = 9;                   // Specify column width (byte width + parity bit)
-        localparam RAM_DEPTH = 2**AddressBusWidth;   // Specify RAM depth (number of entries)
+        localparam NB_COL = DataWidth / 8;            // Specify number of columns (number of bytes)
+        localparam COL_WIDTH = 8 + Parity;                   // Specify column width (byte width + parity bit)
+        localparam RAM_DEPTH = 2**AddressWidth;   // Specify RAM depth (number of entries)
 
         // Uninitialized
         logic [(NB_COL*COL_WIDTH)-1:0] Bram [RAM_DEPTH-1:0];
@@ -37,7 +37,7 @@ module WishboneBRAM
             // bits there are, instead computing where the parity bits are.
             // xxxxxxxxPxxxxxxxxP…
             // Parity storage and TGD lines are trimmed out if !Parity
-            always @(posedge System.CLK)
+            always @(posedge SysCon.CLK)
             if (Initiator.CYC && Initiator.STB && Initiator.SEL[i])
             begin
                 // Organizing under the CYC & STB & SEL[i] test allows a 6-LUT output to select
@@ -50,22 +50,30 @@ module WishboneBRAM
                 begin
                     // Extract data and parity
                     if (Parity) Bram[Initiator.ADDR][i*COL_WIDTH] <= Initiator.TGD_ToTarget[i];
-                    Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+1]
-                      <= Initiator.DAT_ToTarget[(i+1)*COL_WIDTH-1:i*COL_WIDTH+1];
+                    Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+Parity]
+                      <= Initiator.DAT_ToTarget[(i+1)*(COL_WIDTH-Parity)-1:i*(COL_WIDTH-Parity)];
                 end else
                 begin
                     if (Parity) Initiator.TGD_ToInitiator[i] <= Bram[Initiator.ADDR][i*COL_WIDTH];
-                    Initiator.DAT_ToInitiator[(i+1)*COL_WIDTH-1:i*COL_WIDTH+1]
-                      <= Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+1];
+                    Initiator.DAT_ToInitiator[(i+1)*(COL_WIDTH-Parity)-1:i*(COL_WIDTH-Parity)]
+                      <= Bram[Initiator.ADDR][(i+1)*COL_WIDTH-1:i*COL_WIDTH+Parity];
                 end
             end
         end
+
+        // Always returns the data on the next clock cycle, no stall    
+        always @(posedge SysCon.CLK)
+        if (SysCon.RST)
+        begin
+            Initiator.PrepareResponse();
+            Initiator.Unstall();
+        end else
+        begin
+            Initiator.PrepareResponse();
+            Initiator.ACK <= Initiator.RequestReady();
+        end
     end
     endgenerate
-
-    // Always returns the data on the next clock cycle, no stall    
-    always @(posedge System.CLK)
-        Initiator.ACK <= Initiator.CYC & Initiator.STB;
 
 `ifdef FORMAL
     

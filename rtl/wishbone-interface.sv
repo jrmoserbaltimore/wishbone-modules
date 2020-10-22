@@ -15,7 +15,7 @@ interface IWishbone
 );
     // Common from SYSCON
     logic CLK;
-    logic RST = '0;
+    logic RST;
 
     // Target signals
     logic [DataWidth-1:0] DAT_ToInitiator;
@@ -43,23 +43,8 @@ interface IWishbone
 
     assign STALL = ForceStall | InternalStall;
 
-    // Hold the last response
-    // XXX:  Is there any point to buffering?
-    //logic [DataWidth-1:0] LastResponseBuffer;
-    //wire LatestDAT_ToInitiator = ACK ? DAT_ToInitiator : LastResponseBuffer;
-    //logic [TGDWidth-1:0] LastTGDBuffer;
-
-    //logic ACKBuffer;
-    //logic ERRBuffer;
-    //logic RTYBuffer;
-
     // Initiator run every cycle
     task Prepare();
-        //if (ACK) LastResponseBuffer <= DAT_ToInitiator;
-        //if (ACK) LastTGDBuffer <= TGD_ToInitiator;
-        //ACKBuffer <= ACK || ACKBuffer;
-        //ERRBuffer <= ERR || ERRBuffer;
-        //RTYBuffer <= RTY || RTYBuffer;
         STB <= STB & Stalled();
     endtask
 
@@ -90,10 +75,6 @@ interface IWishbone
         WE <= '1;
         SEL <= SEL_o;
         STB <= '1;
-        
-        //ACKBuffer <= '0;
-        //ERRBuffer <= '0;
-        //RTYBuffer <= '0;
     endtask
     
     task RequestData
@@ -108,6 +89,7 @@ interface IWishbone
         TGA <= TGA_o;
         TGC <= TGC_o;
         WE <= '0;
+        SEL <= -1;
         STB <= '1;
     endtask
 
@@ -116,25 +98,24 @@ interface IWishbone
     endfunction
 
     function bit ResponseReady();
-        return ACK; // ? ACK : ACKBuffer;
+        return ACK;
     endfunction
     
     function bit ReceivedRetry();
-        return RTY; // ? RTY : RTYBuffer;
+        return RTY;
     endfunction
     
     function bit ReceivedError();
-        return ERR; // ? ERR : ERRBuffer;
+        return ERR;
     endfunction
 
     // does not check if a response has been received
     function logic [DataWidth-1:0] GetResponse();
-        //ACKBuffer <= '0;
-        return DAT_ToInitiator; // ACK ? DAT_ToInitiator : LastResponseBuffer; 
+        return DAT_ToInitiator; 
     endfunction;
     
     function logic [TGDWidth-1:0] GetResponseTGD();
-        return TGD_ToInitiator; //ACK ? TGD_ToInitiator : LastTGDBuffer;
+        return TGD_ToInitiator;
     endfunction
     
     // Target run every cycle
@@ -147,7 +128,15 @@ interface IWishbone
     function RequestReady();
         return STB & CYC;
     endfunction
+
+    function logic [DataWidth-1:0] GetRequest();
+        return DAT_ToTarget; 
+    endfunction;
     
+    function logic [TGDWidth-1:0] GetRequestTGD();
+        return TGD_ToTarget; 
+    endfunction;
+
     task SendResponse
     (
         input logic [DataWidth-1:0] Data,
@@ -194,8 +183,8 @@ interface IWishbone
         output TGD_ToTarget,
         
         // Bus control
-        output CYC, // XXX Remove
-        output STB, // XXX Remove
+        output CYC,
+        output STB,
         output LOCK,
 
         // Command
@@ -261,6 +250,8 @@ interface IWishbone
         output ForceStall,
         import PrepareResponse,
         import RequestReady,
+        import GetRequest,
+        import GetRequestTGD,
         import SendResponse,
         import SendError,
         import SendRetry,
