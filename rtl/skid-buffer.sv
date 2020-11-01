@@ -21,7 +21,6 @@ module WishboneSkidBuffer
     parameter TGDWidth = 1, // Tag data width
     parameter TGAWidth = 1,
     parameter TGCWidth = 1,
-    parameter BufferSize = 1, // If bigger than 1
     parameter LOWPOWER = 1, // Reduces register transitions
     parameter STRICT = 0, // If set, the bus doesn't clean up after invalid inputs
     localparam SELWidth = DataWidth / Granularity
@@ -32,74 +31,19 @@ module WishboneSkidBuffer
     IWishbone.Target Initiator,
     IWishbone.Initiator Target
 );
-
-    localparam BufferBits = $clog2(BufferSize) ? $clog2(BufferSize) : '1;
-
-    typedef struct
-    {
-        logic cyc;
-        logic [DataWidth-1:0] dat;
-        logic [TGDWidth-1:0] tgd;
-        logic [AddressWidth-1:0] addr;
-        logic lock;
-        logic [SELWidth-1:0] sel;
-        logic [TGAWidth-1:0] tga;
-        logic [TGCWidth-1:0] tgc;
-        logic we;
-        logic [2:0] cti;
-        logic [1:0] bte;
-    } I_Buffer;
-    // Only need to buffer initiator-to-target because only target may stall.
-    logic r_valid [BufferSize-1:0];
-    I_Buffer i_buf [BufferSize-1:0];
-
+    logic r_valid;
     logic r_cyc;
-    logic [DataWidth-1:0] r_dat [BufferSize-1:0];
-    logic [TGDWidth-1:0] r_tgd [BufferSize-1:0];
-    logic [AddressWidth-1:0] r_addr [BufferSize-1:0];
-    logic r_lock [BufferSize-1:0];
-    logic [SELWidth-1:0] r_sel [BufferSize-1:0];
-    logic [TGAWidth-1:0] r_tga [BufferSize-1:0];
-    logic [TGCWidth-1:0] r_tgc [BufferSize-1:0];
-    logic r_we [BufferSize-1:0];
-    logic [2:0] r_cti [BufferSize-1:0];
-    logic [1:0] r_bte [BufferSize-1:0];
+    logic [DataWidth-1:0] r_dat;
+    logic [TGDWidth-1:0] r_tgd;
+    logic [AddressWidth-1:0] r_addr;
+    logic r_lock;
+    logic [SELWidth-1:0] r_sel;
+    logic [TGAWidth-1:0] r_tga;
+    logic [TGCWidth-1:0] r_tgc;
+    logic r_we;
+    logic [2:0] r_cti;
+    logic [1:0] r_bte;
 
-    logic [BufferBits-1:0] BufferIndex;
-    wire w_valid;
-    wire w_cyc;
-    wire w_dat;
-    wire w_tgd;
-    wire w_addr;
-    wire w_lock;
-    wire w_sel;
-    wire w_tga;
-    wire w_tgc;
-    wire w_we;
-    wire w_cti;
-    wire w_bte;
-
-    assign w_valid = r_valid[BufferIndex];
-    /*
-    assign w_dat = r_dat[BufferIndex];
-    assign w_tgd = r_tgd[BufferIndex];
-    assign w_addr = r_addr[BufferIndex];
-    assign w_lock = r_lock[BufferIndex]; 
-    assign w_sel = r_sel[BufferIndex];
-    assign w_tga = r_tga[BufferIndex];
-    assign w_tgc = r_tgc[BufferIndex];
-    assign w_cti = r_cti[BufferIndex];
-    assign w_bte = r_bte[BufferIndex];
-    */
-    assign w_dat = i_buf[BufferIndex].dat;
-    assign w_tgd = i_buf[BufferIndex].tgd;
-    assign w_addr = i_buf[BufferIndex].addr;
-    assign w_lock = i_buf[BufferIndex].lock; 
-    assign w_sel = i_buf[BufferIndex].sel;
-    assign w_tga = i_buf[BufferIndex].tga;
-    assign w_tgc = i_buf[BufferIndex].tgc;
-    assign w_cti = i_buf[BufferIndex].cti;
-    assign w_bte = i_buf[BufferIndex].bte;
     logic i_valid, o_valid;
     assign o_valid = Target.CYC & Target.STB;
 
@@ -113,53 +57,38 @@ module WishboneSkidBuffer
     logic r_CYCDrop;
     logic LastCYC;
 
-    generate
-    genvar i;
-        if (BufferSize <= 1)
-        begin
-            assign BufferIndex = '0;
-            // Only stall if buffer is full
-            assign Initiator.STALL = w_valid;
-            // r_valid outputs to Initiator.CYC and Initiator.STB when forwarding the register
-            assign Target.CYC = Initiator.CYC | w_valid;
-            assign Target.STB = i_valid | w_valid;
-            assign i_valid = Initiator.CYC & Initiator.STB;
-        end else
-        begin
-            // Only stall if buffer is full OR we're waiting to buffer a dropped CYC.
-            assign Initiator.STALL = w_valid & ~r_CYCDrop;
-            // Need to buffer CYC drops
-            assign Target.CYC = (Initiator.CYC & !w_valid) | (w_valid & w_cyc);
-            assign Target.STB = i_valid | (w_valid & w_cyc);
-            assign i_valid = (Initiator.CYC & Initiator.STB) | r_CYCDrop;
-            always_ff @(posedge SysCon.CLK)
-            begin
-                // If we're already waiting to log a dropped CYC, 
-                LastCYC <= Initiator.CYC & ~r_CYCDrop;
-                // If we're stalled and waiting to forward a dropped CYC
-                // OR last CYC was on and current CYC is off, register a dropped CYC.
-                // This ignores flapping during a stall. 
-                r_CYCDrop <= (w_valid & r_CYCDrop) | (LastCYC & ~Initiator.CYC);
-            end
-        end
-    endgenerate
+    // Only stall if buffer is full OR we're waiting to buffer a dropped CYC.
+    assign Initiator.ForceStall = r_valid & ~r_CYCDrop;
+    // Need to buffer CYC drops
+    assign Target.CYC = (Initiator.CYC & !r_valid) | (r_valid & r_cyc);
+    assign Target.STB = i_valid | (r_valid & r_cyc);
+    assign i_valid = (Initiator.CYC & Initiator.STB) | r_CYCDrop;
+    always_ff @(posedge SysCon.CLK)
+    begin
+        // If we're already waiting to log a dropped CYC, 
+        LastCYC <= Initiator.CYC & ~r_CYCDrop;
+        // If we're stalled and waiting to forward a dropped CYC
+        // OR last CYC was on and current CYC is off, register a dropped CYC.
+        // This ignores flapping during a stall. 
+        r_CYCDrop <= (r_valid & r_CYCDrop) | (LastCYC & ~Initiator.CYC);
+    end
 
     // assign the inputs or buffer to the outputs
     always_comb
     begin
         // Put the buffered data on the output bus
-        if (w_valid)
+        if (r_valid)
         begin
-            Target.DAT_ToTarget = w_dat;
-            Target.TGD_ToTarget = w_tgd;
-            Target.ADDR = w_addr;
-            Target.LOCK = w_lock;
-            Target.SEL = w_sel;
-            Target.TGA = w_tga;
-            Target.TGC = w_tgc;
-            Target.WE = w_we;
-            Target.CTI = w_cti;
-            Target.BTE = w_bte;
+            Target.DAT_ToTarget = r_dat;
+            Target.TGD_ToTarget = r_tgd;
+            Target.ADDR = r_addr;
+            Target.LOCK = r_lock;
+            Target.SEL = r_sel;
+            Target.TGA = r_tga;
+            Target.TGC = r_tgc;
+            Target.WE = r_we;
+            Target.CTI = r_cti;
+            Target.BTE = r_bte;
         end else
         begin
             if (!LOWPOWER || i_valid)
@@ -195,11 +124,11 @@ module WishboneSkidBuffer
 
     // Store the data each clock cycle if not stalling
     always_ff @(posedge SysCon.CLK)
-    if (!Syscon.RST)
+    if (!SysCon.RST)
     begin
         // if LOWPOWER, these don't get set unless we have CYC&STB.  In all other conditions
         // when LOWPOWER, r_* |=> $last(r_*)  (or is it current r_*?)
-        if ((!LOWPOWER || i_valid) && !w_valid)
+        if ((!LOWPOWER || i_valid) && !r_valid)
         begin
             r_dat <= Initiator.DAT_ToTarget;
             r_tgd <= Initiator.TGD_ToTarget;
@@ -214,26 +143,22 @@ module WishboneSkidBuffer
         end
     end
 
-    always_ff @(posedge Syscon.CLK)
+    always_ff @(posedge SysCon.CLK)
     begin
         // this satisfies all deassertions and clears the buffer 
-        if (SysCon.RST) r_valid[BufferIndex] <= '0;
+        if (SysCon.RST) r_valid <= '0;
         // Wishbone B4 rule 3.2.0 disallows Target.CYC falling before Target.STB.  Nothing is said about
         // dropping before receiving Target.ACK, but it's implied that's invalid.   
         else if (Initiator.CYC)
         begin
             // Stall hasn't propagated, but incoming data, so buffer.
-            if ((i_valid && !Initiator.STALL) && (o_valid && Target.STALL))
-            begin
-                r_valid[BufferIndex] <= '1;
-                BufferIndex <= (BufferIndex == BufferSize + 1) ? '0 : BufferIndex + 1; 
-            end else r_valid[BufferIndex] <= '0;
+            r_valid <= ((i_valid && !Initiator.Stalled()) && (o_valid && Target.Stalled()));
         end
         // Obviously didn't wait for a bus termination signal but terminated anyway.  If the buffer
         // is tolerant, clear the buffer; else this is trimmed and the bus may do broken things
         // like hold Target.CYC and Target.STB with unchanging data until Initiator.CYC is again asserted.  Doing so
         // MIGHT damage hardware!
-        else if (!STRICT) r_valid[BufferIndex] <= '0;
+        else if (!STRICT) r_valid <= '0;
     end
 
 `ifdef FORMAL
